@@ -195,7 +195,8 @@ DROP TABLE #Docs;
 """
 
 STAGE_ORDER = [
-    ("Total Records", "TotalRecords"),
+    ("Month", "Month"),
+    ("Total Records (Unique)", "TotalRecords"),
     ("Download Pending", "DownloadPending"),
     ("Downloaded", "Downloaded"),
     ("Extraction Completed", "ExtractionCompleted"),
@@ -335,6 +336,30 @@ def prompt_date(label: str) -> str:
             print("  Invalid date format, try again (e.g. 2026-05-01).")
 
 
+def compute_period_label(start_date_str: str, end_date_str: str) -> str:
+    """
+    start_date is inclusive, end_date is exclusive (matches the query semantics).
+    Examples:
+      2026-05-01 -> 2026-06-01            => "May 2026"
+      2026-05-01 -> 2026-07-01            => "May - June 2026"
+      2026-11-01 -> 2027-02-01            => "November 2026 - January 2027"
+    """
+    from datetime import timedelta
+
+    start = datetime.strptime(start_date_str, "%Y-%m-%d")
+    end = datetime.strptime(end_date_str, "%Y-%m-%d")
+
+    last_included = end - timedelta(days=1)
+    start_month, start_year = start.strftime("%B"), start.year
+    end_month, end_year = last_included.strftime("%B"), last_included.year
+
+    if (start.year, start.month) == (last_included.year, last_included.month):
+        return f"{start_month} {start_year}"
+    if start_year == end_year:
+        return f"{start_month} - {end_month} {start_year}"
+    return f"{start_month} {start_year} - {end_month} {end_year}"
+
+
 def prompt_date_range_for(db_key: str) -> tuple:
     print(f"\nUpload date range for {DATABASES[db_key]['label']}:")
     start_date = prompt_date("Start date (inclusive)")
@@ -396,12 +421,18 @@ def main():
 
     # Build pivoted table: rows = stage, columns = database
     headers = ["Stage"] + [DATABASES[k]["label"] for k in selected_dbs]
+
     table_rows = []
     for stage_label, field in STAGE_ORDER:
         row = [stage_label]
         for k in selected_dbs:
-            val = results.get(k, {}).get(field)
-            row.append(val if val is not None else "N/A")
+            if field == "Month":
+                start_date, end_date = date_ranges[k]
+                val = compute_period_label(start_date, end_date)
+            else:
+                val = results.get(k, {}).get(field)
+                val = val if val is not None else "N/A"
+            row.append(val)
         table_rows.append(row)
 
     print("\n" + "=" * 70)
