@@ -228,8 +228,8 @@ def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
         try:
             t0 = time.time()
             conn = get_connection(db_key)
+            conn.timeout = QUERY_TIMEOUT_SECONDS  # pyodbc query timeout lives on the connection
             cursor = conn.cursor()
-            cursor.timeout = QUERY_TIMEOUT_SECONDS  # pyodbc query timeout (seconds)
 
             sql = OPTIMIZED_SQL.format(lock_timeout_ms=LOCK_TIMEOUT_MS)
             cursor.execute(sql, start_date, end_date)
