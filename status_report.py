@@ -138,10 +138,10 @@ DATABASES = {
     },
 }
 
-QUERY_TIMEOUT_SECONDS = 120     # per-attempt query timeout (raised to give lock waits room)
-LOCK_TIMEOUT_MS = 60000         # fail fast on blocking locks instead of hanging (raised from 15s -> 60s)
+QUERY_TIMEOUT_SECONDS = 180     # per-attempt query timeout (headroom beyond lock timeout)
+LOCK_TIMEOUT_MS = 60000         # fail fast on blocking locks instead of hanging
 CONNECT_TIMEOUT_SECONDS = 15
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_BACKOFF_SECONDS = 10       # multiplied by attempt number
 
 # ------------------------------------------------------------------------- #
@@ -153,6 +153,11 @@ RETRY_BACKOFF_SECONDS = 10       # multiplied by attempt number
 OPTIMIZED_SQL = """
 SET NOCOUNT ON;
 SET LOCK_TIMEOUT {lock_timeout_ms};
+-- Reporting query: don't block on / wait for locks held by concurrent
+-- writers. Trades strict consistency for speed (may read uncommitted /
+-- in-flight rows) -- acceptable for a status dashboard, not for anything
+-- requiring exact transactional accuracy.
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @StartDate DATE = ?;
 DECLARE @EndDate   DATE = ?;
