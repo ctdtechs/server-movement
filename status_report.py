@@ -67,9 +67,15 @@ except ImportError:
     print("Missing dependency: pip install pyodbc")
     sys.exit(1)
 
+LOG_FILE = "status_report.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
 )
 log = logging.getLogger("processing_status_report")
 
@@ -217,7 +223,16 @@ def get_connection(db_key: str):
     return conn
 
 
-def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
+# SQLSTATE prefixes worth retrying (transient): timeouts, deadlocks, dropped
+# connections, general connection failures. Everything else (permission
+# denied, invalid object name, syntax errors, etc.) will fail identically on
+# every retry, so we surface it immediately instead of wasting time.
+TRANSIENT_SQLSTATES = ("HYT00", "HYT01", "40001", "08S01", "08001", "08004")
+
+
+def is_transient_error(exc: pyodbc.Error) -> bool:
+    sqlstate = exc.args[0] if exc.args else ""
+    return str(sqlstate).upper() in TRANSIENT_SQLSTATES
     """
     Executes the optimized query with retry + backoff on timeout/blocking.
     Returns a dict of {field_name: count}.
@@ -250,10 +265,20 @@ def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
         except pyodbc.Error as e:
             last_err = e
             log.warning(f"[{db_key}] attempt {attempt}/{MAX_RETRIES} failed: {e}")
+
+            if not is_transient_error(e):
+                log.error(
+                    f"[{db_key}] non-transient error (permission/syntax/object-not-found) "
+                    f"-- not retrying. Full detail logged to {LOG_FILE}. "
+                    f"Check that the login has SELECT on files/documents/extractionDetails "
+                    f"and CREATE TABLE permission in tempdb for this database."
+                )
+                break
+
             if attempt < MAX_RETRIES:
                 sleep_for = RETRY_BACKOFF_SECONDS * attempt
                 log.info(f"[{db_key}] retrying in {sleep_for}s "
-                         f"(likely blocking lock or timeout, not a script bug)")
+                         f"(transient: blocking lock or timeout, not a script bug)")
                 time.sleep(sleep_for)
         finally:
             if conn is not None:
