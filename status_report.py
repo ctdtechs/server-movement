@@ -138,11 +138,11 @@ DATABASES = {
     },
 }
 
-QUERY_TIMEOUT_SECONDS = 60      # per-attempt query timeout
-LOCK_TIMEOUT_MS = 15000         # fail fast on blocking locks instead of hanging
+QUERY_TIMEOUT_SECONDS = 120     # per-attempt query timeout (raised to give lock waits room)
+LOCK_TIMEOUT_MS = 60000         # fail fast on blocking locks instead of hanging (raised from 15s -> 60s)
 CONNECT_TIMEOUT_SECONDS = 15
 MAX_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 5       # multiplied by attempt number
+RETRY_BACKOFF_SECONDS = 10       # multiplied by attempt number
 
 # ------------------------------------------------------------------------- #
 # Optimized SQL -- single pass per source table via temp tables.
@@ -225,15 +225,31 @@ def get_connection(db_key: str):
 
 
 # SQLSTATE prefixes worth retrying (transient): timeouts, deadlocks, dropped
-# connections, general connection failures. Everything else (permission
-# denied, invalid object name, syntax errors, etc.) will fail identically on
-# every retry, so we surface it immediately instead of wasting time.
+# connections, general connection failures.
 TRANSIENT_SQLSTATES = ("HYT00", "HYT01", "40001", "08S01", "08001", "08004")
+
+# SQL Server sometimes reports a genuinely transient condition (lock timeout,
+# deadlock victim, network blip) under a generic SQLSTATE like 42000, with the
+# real reason only visible in the message text / native error number. Catch
+# those here so they still get retried instead of being treated as a
+# permission/syntax error.
+TRANSIENT_MESSAGE_MARKERS = (
+    "lock request time out period exceeded",  # native error 1222
+    "deadlock",                               # native error 1205
+    "timeout expired",
+    "communication link failure",
+    "general network error",
+    "transport-level error",
+    "connection is busy",
+)
 
 
 def is_transient_error(exc: pyodbc.Error) -> bool:
-    sqlstate = exc.args[0] if exc.args else ""
-    return str(sqlstate).upper() in TRANSIENT_SQLSTATES
+    sqlstate = str(exc.args[0]).upper() if exc.args else ""
+    if sqlstate in TRANSIENT_SQLSTATES:
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSIENT_MESSAGE_MARKERS)
 
 
 def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
