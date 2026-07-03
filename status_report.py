@@ -233,6 +233,9 @@ TRANSIENT_SQLSTATES = ("HYT00", "HYT01", "40001", "08S01", "08001", "08004")
 def is_transient_error(exc: pyodbc.Error) -> bool:
     sqlstate = exc.args[0] if exc.args else ""
     return str(sqlstate).upper() in TRANSIENT_SQLSTATES
+
+
+def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
     """
     Executes the optimized query with retry + backoff on timeout/blocking.
     Returns a dict of {field_name: count}.
