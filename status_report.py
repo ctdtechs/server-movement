@@ -67,16 +67,51 @@ except ImportError:
     print("Missing dependency: pip install pyodbc")
     sys.exit(1)
 
+# ------------------------------------------------------------------------- #
+# Console colors (ANSI escape codes -- no extra dependency needed).
+# Auto-disabled when stdout isn't a real terminal (piped/redirected), so
+# nothing garbled ends up in files. The log FILE handler stays plain text
+# regardless -- only the console stream gets colored.
+# ------------------------------------------------------------------------- #
+COLOR_ENABLED = sys.stdout.isatty()
+
+
+class C:
+    RESET = "\033[0m" if COLOR_ENABLED else ""
+    BOLD = "\033[1m" if COLOR_ENABLED else ""
+    DIM = "\033[2m" if COLOR_ENABLED else ""
+    CYAN = "\033[36m" if COLOR_ENABLED else ""
+    GREEN = "\033[32m" if COLOR_ENABLED else ""
+    YELLOW = "\033[33m" if COLOR_ENABLED else ""
+    RED = "\033[31m" if COLOR_ENABLED else ""
+    MAGENTA = "\033[35m" if COLOR_ENABLED else ""
+    BLUE = "\033[34m" if COLOR_ENABLED else ""
+    GRAY = "\033[90m" if COLOR_ENABLED else ""
+
+
+class ColorConsoleFormatter(logging.Formatter):
+    LEVEL_COLORS = {
+        logging.INFO: C.GREEN,
+        logging.WARNING: C.YELLOW,
+        logging.ERROR: C.RED,
+        logging.CRITICAL: C.RED + C.BOLD,
+    }
+
+    def format(self, record):
+        color = self.LEVEL_COLORS.get(record.levelno, "")
+        base = super().format(record)
+        return f"{color}{base}{C.RESET}"
+
+
 LOG_FILE = "status_report.log"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-    ],
-)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(ColorConsoleFormatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+logging.basicConfig(level=logging.INFO, handlers=[console_handler, file_handler])
 log = logging.getLogger("processing_status_report")
 
 # ------------------------------------------------------------------------- #
@@ -321,13 +356,13 @@ def run_status_query(db_key: str, start_date: str, end_date: str) -> dict:
 # ------------------------------------------------------------------------- #
 
 def prompt_database_selection() -> list:
-    print("\nAvailable databases:")
+    print(f"\n{C.CYAN}{C.BOLD}Available databases:{C.RESET}")
     keys = list(DATABASES.keys())
     for i, k in enumerate(keys, start=1):
-        print(f"  {i}. {DATABASES[k]['label']}")
-    print(f"  {len(keys)+1}. ALL")
+        print(f"  {C.GREEN}{i}.{C.RESET} {DATABASES[k]['label']}")
+    print(f"  {C.GREEN}{len(keys)+1}.{C.RESET} ALL")
 
-    raw = input("\nSelect database(s) by number (comma-separated, or 'all'): ").strip().lower()
+    raw = input(f"\n{C.CYAN}Select database(s) by number (comma-separated, or 'all'): {C.RESET}").strip().lower()
     if raw in ("all", str(len(keys) + 1)):
         return keys
 
@@ -337,12 +372,12 @@ def prompt_database_selection() -> list:
         if not part:
             continue
         if not part.isdigit() or not (1 <= int(part) <= len(keys)):
-            print(f"Ignoring invalid selection: '{part}'")
+            print(f"{C.YELLOW}Ignoring invalid selection: '{part}'{C.RESET}")
             continue
         selected.append(keys[int(part) - 1])
 
     if not selected:
-        print("No valid database selected. Exiting.")
+        print(f"{C.RED}No valid database selected. Exiting.{C.RESET}")
         sys.exit(1)
     return selected
 
@@ -389,39 +424,57 @@ def prompt_date_range_for(db_key: str) -> tuple:
 
 
 def print_grid_table(headers: list, rows: list):
-    """Minimal dependency-free ASCII grid table (no tabulate needed)."""
+    """Minimal dependency-free ASCII grid table (no tabulate needed), with
+    ANSI coloring on the console (auto-disabled when not a real terminal)."""
     all_rows = [headers] + rows
+    # Widths must be computed from PLAIN text (no color codes), otherwise
+    # the invisible escape sequences would throw off column alignment.
     col_widths = [
         max(len(str(row[i])) for row in all_rows)
         for i in range(len(headers))
     ]
 
     def sep_line():
-        return "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
+        line = "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
+        return f"{C.GRAY}{line}{C.RESET}"
 
-    def fmt_row(row):
-        cells = [str(cell).ljust(col_widths[i]) for i, cell in enumerate(row)]
-        return "| " + " | ".join(cells) + " |"
+    def fmt_header():
+        cells = [str(h).ljust(col_widths[i]) for i, h in enumerate(headers)]
+        colored = [f"{C.CYAN}{C.BOLD}{c}{C.RESET}" for c in cells]
+        return f"{C.GRAY}|{C.RESET} " + f" {C.GRAY}|{C.RESET} ".join(colored) + f" {C.GRAY}|{C.RESET}"
+
+    def fmt_data_row(row):
+        cells = []
+        for i, cell in enumerate(row):
+            padded = str(cell).ljust(col_widths[i])
+            if i == 0:
+                colored = f"{C.MAGENTA}{C.BOLD}{padded}{C.RESET}"
+            elif str(cell).strip().upper() == "N/A":
+                colored = f"{C.DIM}{padded}{C.RESET}"
+            else:
+                colored = f"{C.GREEN}{padded}{C.RESET}"
+            cells.append(colored)
+        return f"{C.GRAY}|{C.RESET} " + f" {C.GRAY}|{C.RESET} ".join(cells) + f" {C.GRAY}|{C.RESET}"
 
     print(sep_line())
-    print(fmt_row(headers))
+    print(fmt_header())
     print(sep_line())
     for row in rows:
-        print(fmt_row(row))
+        print(fmt_data_row(row))
     print(sep_line())
 
 
 def main():
-    print("=" * 70)
-    print(" Processing Status Report")
-    print("=" * 70)
+    print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
+    print(f"{C.BLUE}{C.BOLD} Processing Status Report{C.RESET}")
+    print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
 
     selected_dbs = prompt_database_selection()
 
     same_range = "y"
     if len(selected_dbs) > 1:
         same_range = input(
-            "\nUse the SAME upload-date range for all selected databases? (y/n): "
+            f"\n{C.CYAN}Use the SAME upload-date range for all selected databases? (y/n): {C.RESET}"
         ).strip().lower() or "y"
 
     date_ranges = {}
@@ -436,8 +489,8 @@ def main():
     results = {}
     for k in selected_dbs:
         start_date, end_date = date_ranges[k]
-        print(f"\nRunning query on {DATABASES[k]['label']} "
-              f"[{start_date} -> {end_date}] ...")
+        print(f"\n{C.YELLOW}Running query on {DATABASES[k]['label']} "
+              f"[{start_date} -> {end_date}] ...{C.RESET}")
         results[k] = run_status_query(k, start_date, end_date)
 
     # Build pivoted table: rows = stage, columns = database
@@ -456,9 +509,9 @@ def main():
             row.append(val)
         table_rows.append(row)
 
-    print("\n" + "=" * 70)
-    print(f" Processing Status ({datetime.now().strftime('%d-%b-%Y')})")
-    print("=" * 70)
+    print(f"\n{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
+    print(f"{C.BLUE}{C.BOLD} Processing Status ({datetime.now().strftime('%d-%b-%Y')}){C.RESET}")
+    print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
     print_grid_table(headers, table_rows)
 
 
