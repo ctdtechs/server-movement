@@ -28,10 +28,10 @@ from email.mime.multipart import MIMEMultipart
 SMTP_SERVER = "smtp.office365.com"
 SMTP_PORT = 587
 
-SENDER_EMAIL = "vn@ctdtechs.com"
-SENDER_PASSWORD_B64 = "VmlnbmVzaEAwNzI2="
+SENDER_EMAIL = ""
+SENDER_PASSWORD_B64 = ""
 
-RECEIVER_EMAIL = "vn@ctdtechs.com"
+RECEIVER_EMAIL = ""
 
 SUBJECT = "SMTP Test Email"
 BODY = "This is a test email sent via Python using Outlook SMTP."
