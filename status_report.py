@@ -59,7 +59,12 @@ Requirements:
 import sys
 import time
 import logging
+import base64
+import smtplib
+import ssl
 from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 try:
     import pyodbc
@@ -178,6 +183,41 @@ LOCK_TIMEOUT_MS = 60000         # fail fast on blocking locks instead of hanging
 CONNECT_TIMEOUT_SECONDS = 15
 MAX_RETRIES = 4
 RETRY_BACKOFF_SECONDS = 10       # multiplied by attempt number
+
+# ------------------------------------------------------------------------- #
+# EMAIL CONFIG -- edit these.
+# ------------------------------------------------------------------------- #
+SMTP_SERVER = "smtp.office365.com"
+SMTP_PORT = 587
+
+MAIL_FROM = "vn@ctdtechs.com"
+
+# Password stored base64-encoded (NOT real encryption -- just avoids a raw
+# plaintext password sitting in the file at a glance; anyone with this file
+# can still decode it in one line).
+# Generate with: python3 -c "import base64; print(base64.b64encode(b'your-password').decode())"
+MAIL_PASSWORD_B64 = "eW91ci1wYXNzd29yZC1vci1hcHAtcGFzc3dvcmQ="  # "your-password-or-app-password"
+
+# Hardcoded defaults, semicolon-separated (e.g. "a@ctdtechs.com;b@ctdtechs.com").
+# The console will also offer to ADD more recipients on top of these at runtime.
+DEFAULT_MAIL_TO = "nv@ctdtechs.com"
+DEFAULT_MAIL_CC = ""  # e.g. "manager@ctdtechs.com;lead@ctdtechs.com"
+
+
+def get_mail_password() -> str:
+    try:
+        return base64.b64decode(MAIL_PASSWORD_B64).decode("utf-8")
+    except Exception as e:
+        raise ValueError(
+            f"MAIL_PASSWORD_B64 is not valid base64: {e}. "
+            "Generate it with: python3 -c \"import base64; "
+            "print(base64.b64encode(b'your-password').decode())\""
+        )
+
+
+def parse_addr_list(raw: str) -> list:
+    """Splits a semicolon-separated address string into a clean list."""
+    return [a.strip() for a in raw.split(";") if a.strip()]
 
 # ------------------------------------------------------------------------- #
 # Optimized SQL -- single pass per source table via temp tables.
@@ -464,6 +504,146 @@ def print_grid_table(headers: list, rows: list):
     print(sep_line())
 
 
+def build_table_rows(selected_dbs: list, results: dict, date_ranges: dict) -> list:
+    table_rows = []
+    for stage_label, field in STAGE_ORDER:
+        row = [stage_label]
+        for k in selected_dbs:
+            if field == "Month":
+                start_date, end_date = date_ranges[k]
+                val = compute_period_label(start_date, end_date)
+            else:
+                val = results.get(k, {}).get(field)
+                val = val if val is not None else "N/A"
+            row.append(val)
+        table_rows.append(row)
+    return table_rows
+
+
+def print_report(selected_dbs: list, results: dict, date_ranges: dict, title: str):
+    headers = ["Stage"] + [DATABASES[k]["label"] for k in selected_dbs]
+    table_rows = build_table_rows(selected_dbs, results, date_ranges)
+
+    print(f"\n{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
+    print(f"{C.BLUE}{C.BOLD} {title}{C.RESET}")
+    print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
+    print_grid_table(headers, table_rows)
+
+
+def build_email_html(selected_dbs: list, results: dict, date_ranges: dict) -> str:
+    """Builds a clean, professional HTML table (email clients don't render
+    ANSI colors, so this is a separate plain-HTML rendering of the same data
+    used by print_grid_table)."""
+    headers = ["Stage"] + [DATABASES[k]["label"] for k in selected_dbs]
+    table_rows = build_table_rows(selected_dbs, results, date_ranges)
+
+    th_cells = "".join(
+        f'<th style="padding:8px 12px;border:1px solid #ccc;background:#2f5597;'
+        f'color:#ffffff;text-align:left;font-family:Segoe UI,Arial,sans-serif;font-size:13px;">'
+        f'{h}</th>'
+        for h in headers
+    )
+
+    body_rows = ""
+    for row in table_rows:
+        tds = "".join(
+            f'<td style="padding:8px 12px;border:1px solid #ccc;'
+            f'font-family:Segoe UI,Arial,sans-serif;font-size:13px;'
+            f'{"font-weight:600;background:#f2f2f2;" if i == 0 else ""}">'
+            f'{cell}</td>'
+            for i, cell in enumerate(row)
+        )
+        body_rows += f"<tr>{tds}</tr>"
+
+    report_date = datetime.now().strftime("%d-%b-%Y")
+
+    html = f"""\
+<html>
+<body style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222;">
+<p>Hi Team,</p>
+<p>Please find below the Processing Status report generated on {report_date}.</p>
+<table style="border-collapse:collapse;margin:12px 0;">
+<thead><tr>{th_cells}</tr></thead>
+<tbody>{body_rows}</tbody>
+</table>
+<p>Regards,<br>Automated Reporting</p>
+</body>
+</html>
+"""
+    return html
+
+
+def send_report_email(html_body: str, subject: str, to_list: list, cc_list: list):
+    msg = MIMEMultipart("alternative")
+    msg["From"] = MAIL_FROM
+    msg["To"] = "; ".join(to_list)
+    if cc_list:
+        msg["Cc"] = "; ".join(cc_list)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(html_body, "html"))
+
+    all_recipients = to_list + cc_list
+
+    password = get_mail_password()
+    context = ssl.create_default_context()
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.ehlo()
+        server.starttls(context=context)
+        server.ehlo()
+        server.login(MAIL_FROM, password)
+        server.sendmail(MAIL_FROM, all_recipients, msg.as_string())
+
+
+def prompt_send_email(selected_dbs: list, results: dict, date_ranges: dict):
+    choice = input(
+        f"\n{C.CYAN}Do you want to send this report via email? (y/n): {C.RESET}"
+    ).strip().lower()
+    if choice != "y":
+        return
+
+    default_to = parse_addr_list(DEFAULT_MAIL_TO)
+    default_cc = parse_addr_list(DEFAULT_MAIL_CC)
+
+    print(f"{C.GRAY}Default To: {'; '.join(default_to) or '(none)'}{C.RESET}")
+    print(f"{C.GRAY}Default Cc: {'; '.join(default_cc) or '(none)'}{C.RESET}")
+
+    extra_to_raw = input(
+        f"{C.CYAN}Additional To recipients, semicolon-separated (Enter to skip): {C.RESET}"
+    ).strip()
+    extra_cc_raw = input(
+        f"{C.CYAN}Additional Cc recipients, semicolon-separated (Enter to skip): {C.RESET}"
+    ).strip()
+
+    to_list = default_to + parse_addr_list(extra_to_raw)
+    cc_list = default_cc + parse_addr_list(extra_cc_raw)
+
+    # de-dupe while preserving order
+    to_list = list(dict.fromkeys(to_list))
+    cc_list = [addr for addr in dict.fromkeys(cc_list) if addr not in to_list]
+
+    if not to_list:
+        print(f"{C.RED}No To recipients configured or entered -- not sending.{C.RESET}")
+        return
+
+    subject = f"Processing Status Report - {datetime.now().strftime('%d-%b-%Y')}"
+    html_body = build_email_html(selected_dbs, results, date_ranges)
+
+    print(f"{C.YELLOW}Sending email to: {', '.join(to_list)}"
+          f"{' | Cc: ' + ', '.join(cc_list) if cc_list else ''} ...{C.RESET}")
+    try:
+        send_report_email(html_body, subject, to_list, cc_list)
+        print(f"{C.GREEN}Email sent successfully.{C.RESET}")
+    except ValueError as e:
+        print(f"{C.RED}Mail config error: {e}{C.RESET}")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"{C.RED}Mail auth failed: {e}{C.RESET}")
+        print(f"{C.GRAY}-> Check MAIL_FROM/MAIL_PASSWORD_B64. If MFA is enabled, use an App Password.{C.RESET}")
+    except smtplib.SMTPException as e:
+        print(f"{C.RED}SMTP error: {e}{C.RESET}")
+    except Exception as e:
+        print(f"{C.RED}Unexpected error sending mail: {e}{C.RESET}")
+
+
 def main():
     print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
     print(f"{C.BLUE}{C.BOLD} Processing Status Report{C.RESET}")
@@ -493,26 +673,48 @@ def main():
               f"[{start_date} -> {end_date}] ...{C.RESET}")
         results[k] = run_status_query(k, start_date, end_date)
 
-    # Build pivoted table: rows = stage, columns = database
-    headers = ["Stage"] + [DATABASES[k]["label"] for k in selected_dbs]
+    # A DB counts as "failed" if run_status_query exhausted its internal
+    # retries and returned an empty dict (see run_status_query / log.error
+    # "gave up after N attempts").
+    failed_dbs = [k for k in selected_dbs if not results.get(k)]
 
-    table_rows = []
-    for stage_label, field in STAGE_ORDER:
-        row = [stage_label]
-        for k in selected_dbs:
-            if field == "Month":
+    title = "Processing Status" if not failed_dbs else "Processing Status (partial -- some DBs failed)"
+    print_report(selected_dbs, results, date_ranges, f"{title} ({datetime.now().strftime('%d-%b-%Y')})")
+
+    if failed_dbs:
+        failed_labels = ", ".join(DATABASES[k]["label"] for k in failed_dbs)
+        print(f"\n{C.RED}{C.BOLD}Failed to fetch results for: {failed_labels}{C.RESET}")
+        print(f"{C.GRAY}(see {LOG_FILE} for the full error on each){C.RESET}")
+
+        retry_choice = input(
+            f"\n{C.CYAN}Retry just the failed database(s) once? (y/n): {C.RESET}"
+        ).strip().lower()
+
+        if retry_choice == "y":
+            still_failed = []
+            for k in failed_dbs:
                 start_date, end_date = date_ranges[k]
-                val = compute_period_label(start_date, end_date)
-            else:
-                val = results.get(k, {}).get(field)
-                val = val if val is not None else "N/A"
-            row.append(val)
-        table_rows.append(row)
+                print(f"\n{C.YELLOW}Retrying {DATABASES[k]['label']} "
+                      f"[{start_date} -> {end_date}] ...{C.RESET}")
+                new_result = run_status_query(k, start_date, end_date)
+                if new_result:
+                    results[k] = new_result
+                    print(f"{C.GREEN}[{k}] retry succeeded.{C.RESET}")
+                else:
+                    still_failed.append(k)
+                    print(f"{C.RED}[{k}] retry failed again -- leaving as N/A.{C.RESET}")
 
-    print(f"\n{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
-    print(f"{C.BLUE}{C.BOLD} Processing Status ({datetime.now().strftime('%d-%b-%Y')}){C.RESET}")
-    print(f"{C.BLUE}{C.BOLD}{'=' * 70}{C.RESET}")
-    print_grid_table(headers, table_rows)
+            final_title = "Processing Status (final, after retry)"
+            if still_failed:
+                still_failed_labels = ", ".join(DATABASES[k]["label"] for k in still_failed)
+                final_title += f" -- still failed: {still_failed_labels}"
+            print_report(selected_dbs, results, date_ranges, f"{final_title} ({datetime.now().strftime('%d-%b-%Y')})")
+        else:
+            print(f"{C.GRAY}Skipping retry -- final result above includes N/A for failed DB(s).{C.RESET}")
+
+    # Reached regardless of whether there were failures/retries -- always
+    # offer to email whatever the final results ended up being.
+    prompt_send_email(selected_dbs, results, date_ranges)
 
 
 if __name__ == "__main__":
